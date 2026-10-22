@@ -1,5 +1,6 @@
 locals {
-  name = "${var.project_name}-${var.environment}"
+  # Serviço de Orçamento e Pagamento: banco relacional próprio e fila de comandos.
+  name = "${var.project_name}-${var.environment}-orcamento-pagamento"
 
   db_identifier = "${local.name}-db"
 
@@ -18,7 +19,7 @@ resource "aws_db_subnet_group" "main" {
 
 resource "aws_security_group" "database" {
   name        = "${local.name}-database-sg"
-  description = "PostgreSQL access restricted to authorized application security groups"
+  description = "PostgreSQL access restricted to the Orcamento e Pagamento service"
   vpc_id      = var.vpc_id
 
   dynamic "ingress" {
@@ -48,8 +49,6 @@ resource "aws_db_parameter_group" "postgres" {
     apply_method = "pending-reboot"
   }
 
-  # Conexões e desconexões são registradas de propósito: sustentam a evidência de
-  # que a aplicação no EKS e a Lambda de login realmente alcançaram o banco.
   parameter {
     name  = "log_connections"
     value = var.log_connections ? "1" : "0"

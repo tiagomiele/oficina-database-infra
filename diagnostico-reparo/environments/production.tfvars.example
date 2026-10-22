@@ -1,0 +1,5 @@
+aws_region  = "us-west-2"
+environment = "production"
+
+deletion_protection    = true
+point_in_time_recovery = true

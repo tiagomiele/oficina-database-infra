@@ -7,6 +7,7 @@ provider "aws" {
       Environment = var.environment
       ManagedBy   = "terraform"
       Repository  = "oficina-database-infra"
+      Service     = "diagnostico-reparo"
     }
   }
 }

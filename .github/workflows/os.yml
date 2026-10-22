@@ -1,0 +1,33 @@
+name: Database OS (RDS + SQS)
+
+on:
+  pull_request:
+    branches: [main, homolog]
+    paths:
+      - '.github/workflows/os.yml'
+      - '.github/workflows/terraform-component.yml'
+      - 'os/**'
+      - 'modules/sqs-com-dlq/**'
+      - 'scripts/sync-database-outputs.py'
+  push:
+    branches: [main, homolog]
+    paths:
+      - '.github/workflows/os.yml'
+      - '.github/workflows/terraform-component.yml'
+      - 'os/**'
+      - 'modules/sqs-com-dlq/**'
+      - 'scripts/sync-database-outputs.py'
+  workflow_dispatch:
+
+concurrency:
+  group: database-os-${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  terraform:
+    uses: ./.github/workflows/terraform-component.yml
+    with:
+      component: os
+      workspace_key: OS
+      sync_os_outputs: true
+    secrets: inherit

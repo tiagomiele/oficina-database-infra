@@ -38,7 +38,28 @@ output "jdbc_url" {
   value       = "jdbc:postgresql://${aws_db_instance.main.address}:${aws_db_instance.main.port}/${var.db_name}"
 }
 
-output "rds_newrelic_telemetry_function_name" {
-  description = "Lambda agendada que publica telemetria agregada do RDS no New Relic."
-  value       = try(aws_lambda_function.rds_telemetry["enabled"].function_name, null)
+
+output "queue_name" {
+  description = "Fila SQS de entrada do Orçamento e Pagamento."
+  value       = module.fila.queue_name
+}
+
+output "queue_url" {
+  description = "URL da fila SQS de entrada do Orçamento e Pagamento."
+  value       = module.fila.queue_url
+}
+
+output "queue_arn" {
+  description = "ARN da fila SQS de entrada do Orçamento e Pagamento."
+  value       = module.fila.queue_arn
+}
+
+output "dlq_name" {
+  description = "DLQ da fila de entrada do Orçamento e Pagamento."
+  value       = module.fila.dlq_name
+}
+
+output "dlq_url" {
+  description = "URL da DLQ do Orçamento e Pagamento."
+  value       = module.fila.dlq_url
 }
