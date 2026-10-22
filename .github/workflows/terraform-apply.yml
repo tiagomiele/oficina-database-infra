@@ -1,0 +1,303 @@
+# validação deploy da aplicação homolog, infraestrutura, add-ons e observabilidade
+name: Terraform deploy
+
+on:
+  push:
+    branches: [main, homolog]
+    paths:
+      - '.github/workflows/terraform-apply.yml'
+      - 'environments/**'
+      - 'lambda/**'
+      - 'scripts/**'
+      - '*.tf'
+      - '.terraform.lock.hcl'
+  workflow_dispatch:
+
+concurrency:
+  group: terraform-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-homolog:
+    name: Validate configuration and AWS
+    if: github.ref_name == 'homolog'
+    runs-on: ubuntu-latest
+    environment: homolog
+    permissions:
+      contents: read
+    env:
+      TARGET_ENVIRONMENT: homolog
+      TF_CLOUD_ORGANIZATION: ${{ vars.TF_CLOUD_ORGANIZATION }}
+      TF_WORKSPACE: ${{ vars.TF_WORKSPACE_HOMOLOG }}
+      ENABLE_TERRAFORM_APPLY: ${{ vars.ENABLE_TERRAFORM_APPLY }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+    steps:
+      - name: Validate branch and deployment configuration
+        env:
+          TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+          GITHUB_SYNC_TOKEN: ${{ secrets.GITHUB_SYNC_TOKEN }}
+          SYNC_APP_CLIENT_ID: ${{ vars.SYNC_APP_CLIENT_ID }}
+          SYNC_APP_PRIVATE_KEY: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$ENABLE_TERRAFORM_APPLY" != "true" ]; then
+            echo "::error::ENABLE_TERRAFORM_APPLY deve valer true no ambiente ${TARGET_ENVIRONMENT}."
+            exit 1
+          fi
+          missing=()
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN TF_CLOUD_ORGANIZATION TF_WORKSPACE TF_API_TOKEN; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ -z "$GITHUB_SYNC_TOKEN" ] && { [ -z "$SYNC_APP_CLIENT_ID" ] || [ -z "$SYNC_APP_PRIVATE_KEY" ]; }; then
+            missing+=("GITHUB_SYNC_TOKEN ou SYNC_APP_CLIENT_ID+SYNC_APP_PRIVATE_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Configuração de deploy incompleta: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Validate AWS Academy session
+        run: |
+          aws sts get-caller-identity >/dev/null
+          echo "Sessão AWS válida."
+
+  terraform-homolog:
+    name: Terraform database
+    needs: validate-homolog
+    runs-on: ubuntu-latest
+    environment: homolog
+    permissions:
+      contents: read
+    env:
+      TARGET_ENVIRONMENT: homolog
+      TF_CLOUD_ORGANIZATION: ${{ vars.TF_CLOUD_ORGANIZATION }}
+      TF_WORKSPACE: ${{ vars.TF_WORKSPACE_HOMOLOG }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform init
+        run: terraform init -input=false -lockfile=readonly
+
+      - name: Adopt existing telemetry log group
+        run: |
+          set -euo pipefail
+          resource_address='aws_cloudwatch_log_group.rds_telemetry["enabled"]'
+          log_group_name="/aws/lambda/oficina-${TARGET_ENVIRONMENT}-rds-newrelic-telemetry"
+
+          if terraform state show "$resource_address" >/dev/null 2>&1; then
+            echo "Log Group já gerenciado pelo Terraform."
+            exit 0
+          fi
+
+          if ! aws logs describe-log-groups \
+            --region "$AWS_REGION" \
+            --log-group-name-prefix "$log_group_name" \
+            --no-paginate \
+            --query 'logGroups[].logGroupName' \
+            --output text | tr '\t' '\n' | grep -Fxq "$log_group_name"; then
+            echo "Log Group não existe; o Terraform irá criá-lo."
+            exit 0
+          fi
+
+          cat > existing-rds-telemetry-log-group.auto.tf <<EOF
+          import {
+            to = aws_cloudwatch_log_group.rds_telemetry["enabled"]
+            id = "$log_group_name"
+          }
+          EOF
+
+          echo "Log Group existente será importado pelo Terraform."
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve -no-color
+
+      - name: Generate GitHub App synchronization token
+        id: sync-app-token
+        if: ${{ vars.SYNC_APP_CLIENT_ID != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: oficina-os-service
+
+      - name: Sincronizar JDBC com Auth e Backend
+        env:
+          TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+          GITHUB_SYNC_TOKEN: ${{ steps.sync-app-token.outputs.token || secrets.GITHUB_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          terraform output -json > "$RUNNER_TEMP/database-outputs.json"
+          python3 scripts/sync-database-outputs.py \
+            --outputs-file "$RUNNER_TEMP/database-outputs.json" \
+            --organization "$TF_CLOUD_ORGANIZATION" \
+            --auth-workspace "oficina-auth-${TARGET_ENVIRONMENT}" \
+            --environment "$TARGET_ENVIRONMENT"
+          echo "- JDBC sincronizado com Auth e Backend" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform outputs
+        run: terraform output -no-color
+
+  summary-homolog:
+    name: Deployment summary
+    needs: terraform-homolog
+    runs-on: ubuntu-latest
+    environment: homolog
+    permissions:
+      contents: read
+    env:
+      TF_WORKSPACE: ${{ vars.TF_WORKSPACE_HOMOLOG }}
+    steps:
+      - name: Summary
+        run: |
+          {
+            echo "## Database aplicado em homolog"
+            echo
+            echo "- workspace: \`${TF_WORKSPACE}\`"
+            echo "- branch: \`${GITHUB_REF_NAME}\`"
+            echo "- commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-production:
+    name: Apply (production)
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    env:
+      TARGET_ENVIRONMENT: production
+      TF_CLOUD_ORGANIZATION: ${{ vars.TF_CLOUD_ORGANIZATION }}
+      TF_WORKSPACE: ${{ vars.TF_WORKSPACE_PRODUCTION }}
+      ENABLE_TERRAFORM_APPLY: ${{ vars.ENABLE_TERRAFORM_APPLY }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate branch and deployment configuration
+        env:
+          TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+          GITHUB_SYNC_TOKEN: ${{ secrets.GITHUB_SYNC_TOKEN }}
+          SYNC_APP_CLIENT_ID: ${{ vars.SYNC_APP_CLIENT_ID }}
+          SYNC_APP_PRIVATE_KEY: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$ENABLE_TERRAFORM_APPLY" != "true" ]; then
+            echo "::error::ENABLE_TERRAFORM_APPLY deve valer true no ambiente ${TARGET_ENVIRONMENT}."
+            exit 1
+          fi
+          missing=()
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN TF_CLOUD_ORGANIZATION TF_WORKSPACE TF_API_TOKEN; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ -z "$GITHUB_SYNC_TOKEN" ] && { [ -z "$SYNC_APP_CLIENT_ID" ] || [ -z "$SYNC_APP_PRIVATE_KEY" ]; }; then
+            missing+=("GITHUB_SYNC_TOKEN ou SYNC_APP_CLIENT_ID+SYNC_APP_PRIVATE_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Configuração de deploy incompleta: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Validate AWS Academy session
+        run: |
+          aws sts get-caller-identity >/dev/null
+          echo "Sessão AWS válida."
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform init
+        run: terraform init -input=false -lockfile=readonly
+
+      - name: Adopt existing telemetry log group
+        run: |
+          set -euo pipefail
+          resource_address='aws_cloudwatch_log_group.rds_telemetry["enabled"]'
+          log_group_name="/aws/lambda/oficina-${TARGET_ENVIRONMENT}-rds-newrelic-telemetry"
+
+          if terraform state show "$resource_address" >/dev/null 2>&1; then
+            echo "Log Group já gerenciado pelo Terraform."
+            exit 0
+          fi
+
+          if ! aws logs describe-log-groups \
+            --region "$AWS_REGION" \
+            --log-group-name-prefix "$log_group_name" \
+            --no-paginate \
+            --query 'logGroups[].logGroupName' \
+            --output text | tr '\t' '\n' | grep -Fxq "$log_group_name"; then
+            echo "Log Group não existe; o Terraform irá criá-lo."
+            exit 0
+          fi
+
+          cat > existing-rds-telemetry-log-group.auto.tf <<EOF
+          import {
+            to = aws_cloudwatch_log_group.rds_telemetry["enabled"]
+            id = "$log_group_name"
+          }
+          EOF
+
+          echo "Log Group existente será importado pelo Terraform."
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve -no-color
+
+      - name: Generate GitHub App synchronization token
+        id: sync-app-token
+        if: ${{ vars.SYNC_APP_CLIENT_ID != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: oficina-os-service
+
+      - name: Sincronizar JDBC com Auth e Backend
+        env:
+          TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+          GITHUB_SYNC_TOKEN: ${{ steps.sync-app-token.outputs.token || secrets.GITHUB_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          terraform output -json > "$RUNNER_TEMP/database-outputs.json"
+          python3 scripts/sync-database-outputs.py \
+            --outputs-file "$RUNNER_TEMP/database-outputs.json" \
+            --organization "$TF_CLOUD_ORGANIZATION" \
+            --auth-workspace "oficina-auth-${TARGET_ENVIRONMENT}" \
+            --environment "$TARGET_ENVIRONMENT"
+          echo "- JDBC sincronizado com Auth e Backend" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform outputs
+        run: terraform output -no-color
+
+      - name: Summary
+        run: |
+          {
+            echo "## Database aplicado em ${TARGET_ENVIRONMENT}"
+            echo
+            echo "- workspace: \`${TF_WORKSPACE}\`"
+            echo "- branch: \`${GITHUB_REF_NAME}\`"
+            echo "- commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

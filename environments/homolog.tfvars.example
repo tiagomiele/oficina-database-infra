@@ -1,0 +1,40 @@
+aws_region  = "us-west-2"
+environment = "homolog"
+
+vpc_id = "vpc-ALTERAR"
+private_subnet_ids = [
+  "subnet-ALTERAR-A",
+  "subnet-ALTERAR-B",
+]
+allowed_security_group_ids = ["sg-ALTERAR-EKS"]
+
+db_name                  = "oficina"
+db_username              = "oficina_admin"
+db_engine_version        = "16"
+db_instance_class        = "db.t3.micro"
+db_allocated_storage     = 20
+db_max_allocated_storage = 40
+multi_az                 = false
+backup_retention_days    = 7
+deletion_protection      = false
+skip_final_snapshot      = true
+
+# Observabilidade: logs do PostgreSQL no CloudWatch com retenção curta.
+enabled_cloudwatch_logs_exports = ["postgresql"]
+manage_cloudwatch_log_groups    = true
+cloudwatch_logs_retention_days  = 7
+log_connections                 = true
+log_disconnections              = true
+log_min_duration_statement_ms   = 1000
+log_statement                   = "ddl"
+
+# A configuração central preenche Account ID e License key no HCP Terraform.
+rds_newrelic_telemetry_enabled = true
+newrelic_region                = "US"
+
+# Performance Insights e Enhanced Monitoring permanecem desligados por custo
+# e porque o Enhanced Monitoring exigiria criar role IAM, bloqueado no Academy.
+performance_insights_enabled = false
+monitoring_interval          = 0
+
+# db_password deve ser cadastrada como variável sensível no HCP Terraform.

@@ -1,0 +1,102 @@
+erDiagram
+    users {
+        UUID id PK
+        VARCHAR email UK
+        VARCHAR perfil
+        BOOLEAN ativo
+    }
+    clientes {
+        BIGINT id_cliente PK
+        VARCHAR documento UK
+        VARCHAR documento_normalizado UK
+        VARCHAR tipo_documento
+        BOOLEAN ativo
+    }
+    veiculos {
+        VARCHAR id_placa PK
+        BIGINT id_cliente PK,FK
+        VARCHAR marca
+        VARCHAR modelo
+    }
+    servicos {
+        BIGINT id_servico PK
+        VARCHAR nome
+        NUMERIC preco
+    }
+    pecas {
+        BIGINT id_sku PK
+        VARCHAR nome
+        NUMERIC preco
+    }
+    estoque_pecas {
+        BIGINT id_sku PK,FK
+        INTEGER quantidade
+    }
+    movimentacao_estoque_pecas {
+        BIGINT id PK
+        BIGINT id_sku FK
+        VARCHAR id_ordem_servico
+        INTEGER quantidade
+        VARCHAR tipo
+    }
+    notas_fiscais_fornecedor {
+        VARCHAR numero_nota PK
+        VARCHAR serie_nota PK
+        VARCHAR cnpj_fornecedor PK
+        DATE data_emissao PK
+    }
+    itens_nota_fiscal_fornecedor {
+        VARCHAR numero_nota PK,FK
+        VARCHAR serie_nota PK,FK
+        VARCHAR cnpj_fornecedor PK,FK
+        DATE data_emissao PK,FK
+        INTEGER numero_item PK
+        BIGINT id_sku FK
+    }
+    numero_os_sequencia {
+        INTEGER mes PK
+        INTEGER ano PK
+        INTEGER ultimo_numero
+    }
+    ordens_servico {
+        VARCHAR id_ordem_servico PK
+        BIGINT id_cliente FK
+        VARCHAR id_placa FK
+        VARCHAR status
+        TIMESTAMPTZ inicio_execucao
+        TIMESTAMPTZ fim_execucao
+    }
+    orcamentos_itens_ordem_servico {
+        VARCHAR id_ordem_servico PK,FK
+        BIGINT id_orcamento PK
+        INTEGER numero_item PK
+        VARCHAR tipo_item
+        BIGINT id_servico_sku
+    }
+    historico_status_ordem_servico {
+        BIGINT id PK
+        VARCHAR id_ordem_servico FK
+        VARCHAR status
+        TIMESTAMPTZ entrada_em
+        TIMESTAMPTZ saida_em
+    }
+    conta_corrente_oficina {
+        BIGINT id PK
+        VARCHAR tipo
+        NUMERIC valor
+        TIMESTAMPTZ data_lancamento
+        VARCHAR id_ordem_servico
+    }
+
+    clientes ||--o{ veiculos : possui
+    clientes ||--o{ ordens_servico : solicita
+    veiculos ||--o{ ordens_servico : recebe
+    pecas ||--o| estoque_pecas : mantem_saldo
+    pecas ||--o{ movimentacao_estoque_pecas : movimenta
+    notas_fiscais_fornecedor ||--|{ itens_nota_fiscal_fornecedor : contem
+    pecas ||--o{ itens_nota_fiscal_fornecedor : adquirida
+    ordens_servico ||--o{ orcamentos_itens_ordem_servico : compoe
+    ordens_servico ||--o{ historico_status_ordem_servico : registra
+    notas_fiscais_fornecedor ||..o{ conta_corrente_oficina : correlaciona_sem_fk
+    ordens_servico ||..o{ movimentacao_estoque_pecas : correlaciona_sem_fk
+    ordens_servico ||..o{ conta_corrente_oficina : correlaciona_sem_fk

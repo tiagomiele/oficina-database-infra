@@ -1,0 +1,16 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+rds-newrelic-telemetry.zip
+__pycache__/
+*.tfvars
+!*.tfvars.example
+.env
+.env.*
+!.env.example
+node_modules/
+.idea/
+.vscode/
+.DS_Store
