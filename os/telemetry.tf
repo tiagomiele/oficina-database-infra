@@ -56,6 +56,7 @@ resource "aws_lambda_function" "rds_telemetry" {
       NEW_RELIC_REGION        = var.newrelic_region
       RDS_INSTANCE_IDENTIFIER = local.db_identifier
       RDS_LOG_GROUP_NAME      = local.postgres_log_group
+      SQS_DLQ_PREFIX          = "${var.project_name}-${var.environment}-"
     }
   }
 

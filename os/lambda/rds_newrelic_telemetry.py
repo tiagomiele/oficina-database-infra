@@ -9,6 +9,7 @@ import boto3
 
 CLOUDWATCH = boto3.client("cloudwatch")
 LOGS = boto3.client("logs")
+SQS = boto3.client("sqs")
 
 METRICS = {
     "cpuUtilizationPercent": ("CPUUtilization", "Percent"),
@@ -87,6 +88,29 @@ def _send_event(event):
         raise RuntimeError(f"New Relic respondeu HTTP {error.code}") from error
 
 
+def _dlq_samples(prefix, environment):
+    """Uma amostra por DLQ da Saga (filas com o prefixo do ambiente e sufixo -dlq)."""
+    urls = SQS.list_queues(QueueNamePrefix=prefix).get("QueueUrls", [])
+    samples = []
+    for url in urls:
+        name = url.rsplit("/", 1)[-1]
+        if not name.endswith("-dlq"):
+            continue
+        attributes = SQS.get_queue_attributes(
+            QueueUrl=url, AttributeNames=["ApproximateNumberOfMessages"]
+        )["Attributes"]
+        samples.append(
+            {
+                "eventType": "OficinaSqsSample",
+                "timestamp": int(time.time() * 1000),
+                "environment": environment,
+                "queueName": name,
+                "approximateNumberOfMessages": int(attributes["ApproximateNumberOfMessages"]),
+            }
+        )
+    return samples
+
+
 def handler(_event, _context):
     identifier = os.environ["RDS_INSTANCE_IDENTIFIER"]
     log_group = os.environ["RDS_LOG_GROUP_NAME"]
@@ -113,6 +137,10 @@ def handler(_event, _context):
             sample[attribute] = value
 
     _send_event(sample)
+    dlq_prefix = os.environ.get("SQS_DLQ_PREFIX", "")
+    if dlq_prefix:
+        for dlq_sample in _dlq_samples(dlq_prefix, sample["environment"]):
+            _send_event(dlq_sample)
     print(
         json.dumps(
             {
