@@ -58,6 +58,41 @@ class RdsNewRelicTelemetryTest(unittest.TestCase):
         self.assertNotIn("sql", sample)
         self.assertNotIn("credentials", sample)
 
+    def test_handler_publishes_dlq_depth_of_saga_queues(self):
+        environment = {
+            "ENVIRONMENT": "homolog",
+            "RDS_INSTANCE_IDENTIFIER": "oficina-homolog-db",
+            "RDS_LOG_GROUP_NAME": "/aws/rds/instance/oficina-homolog-db/postgresql",
+            "SQS_DLQ_PREFIX": "oficina-homolog-",
+        }
+        base = "https://sqs.us-east-1.amazonaws.com/123"
+        self.module.SQS.list_queues.return_value = {
+            "QueueUrls": [
+                f"{base}/oficina-homolog-os-eventos",
+                f"{base}/oficina-homolog-os-eventos-dlq",
+                f"{base}/oficina-homolog-diagnostico-reparo-comandos-dlq",
+            ]
+        }
+        self.module.SQS.get_queue_attributes.side_effect = [
+            {"Attributes": {"ApproximateNumberOfMessages": "3"}},
+            {"Attributes": {"ApproximateNumberOfMessages": "0"}},
+        ]
+        with (
+            patch.dict(os.environ, environment, clear=False),
+            patch.object(self.module, "_count_logs", side_effect=[0, 0]),
+            patch.object(self.module, "_latest_metric", return_value=None),
+            patch.object(self.module, "_send_event") as send_event,
+        ):
+            self.module.handler({}, None)
+
+        samples = [call.args[0] for call in send_event.call_args_list[1:]]
+        self.module.SQS.list_queues.assert_called_once_with(QueueNamePrefix="oficina-homolog-")
+        self.assertEqual(
+            [(s["queueName"], s["approximateNumberOfMessages"]) for s in samples],
+            [("oficina-homolog-os-eventos-dlq", 3), ("oficina-homolog-diagnostico-reparo-comandos-dlq", 0)],
+        )
+        self.assertTrue(all(s["eventType"] == "OficinaSqsSample" for s in samples))
+
 
 if __name__ == "__main__":
     unittest.main()
