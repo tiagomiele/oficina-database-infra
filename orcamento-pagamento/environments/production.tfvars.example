@@ -18,7 +18,7 @@ multi_az                  = true
 backup_retention_days     = 14
 deletion_protection       = true
 skip_final_snapshot       = false
-final_snapshot_identifier = "oficina-production-db-final"
+final_snapshot_identifier = "oficina-orcamento-pagamento-production-db-final"
 
 # Produção é mais conservadora que homologação: retenção maior de backup e de log.
 enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
@@ -28,10 +28,6 @@ log_connections                 = true
 log_disconnections              = true
 log_min_duration_statement_ms   = 1000
 log_statement                   = "ddl"
-
-# A configuração central preenche Account ID e License key no HCP Terraform.
-rds_newrelic_telemetry_enabled = true
-newrelic_region                = "US"
 
 performance_insights_enabled = false
 monitoring_interval          = 0

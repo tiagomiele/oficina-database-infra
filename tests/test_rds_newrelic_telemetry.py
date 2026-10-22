@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-MODULE_PATH = Path(__file__).parents[1] / "lambda" / "rds_newrelic_telemetry.py"
+MODULE_PATH = Path(__file__).parents[1] / "os" / "lambda" / "rds_newrelic_telemetry.py"
 
 
 def load_module():

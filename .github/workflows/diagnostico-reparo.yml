@@ -1,0 +1,30 @@
+name: Database Diagnóstico e Reparo (DynamoDB + SQS)
+
+on:
+  pull_request:
+    branches: [main, homolog]
+    paths:
+      - '.github/workflows/diagnostico-reparo.yml'
+      - '.github/workflows/terraform-component.yml'
+      - 'diagnostico-reparo/**'
+      - 'modules/sqs-com-dlq/**'
+  push:
+    branches: [main, homolog]
+    paths:
+      - '.github/workflows/diagnostico-reparo.yml'
+      - '.github/workflows/terraform-component.yml'
+      - 'diagnostico-reparo/**'
+      - 'modules/sqs-com-dlq/**'
+  workflow_dispatch:
+
+concurrency:
+  group: database-diagnostico-reparo-${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  terraform:
+    uses: ./.github/workflows/terraform-component.yml
+    with:
+      component: diagnostico-reparo
+      workspace_key: DIAGNOSTICO_REPARO
+    secrets: inherit

@@ -2,7 +2,17 @@
 >
 > Bancos e filas isolados por serviço (RDS, DynamoDB e SQS).
 >
-> Base importada de [`fiap-tech-challenge-fase3-oficina-database-infra`](https://github.com/tiagomiele/fiap-tech-challenge-fase3-oficina-database-infra) (commit `8952100`), sem alterações funcionais. A evolução para a Fase 4 é feita por PRs nas próximas fases; o conteúdo abaixo ainda descreve a Fase 3.
+> Base importada da Fase 3. Na Fase 4 o repositório tem **uma pasta por serviço**, cada uma com workspace HCP, state e workflow próprios — aplicar um banco não altera os outros:
+
+| Pasta | Recursos | Workspace HCP | Workflow |
+|---|---|---|---|
+| `os/` | RDS PostgreSQL do OS Service + fila `oficina-<env>-os-eventos` + DLQ + telemetria New Relic | `oficina-fase4-db-os-<env>` | `os.yml` |
+| `orcamento-pagamento/` | RDS PostgreSQL próprio + fila `oficina-<env>-orcamento-pagamento-comandos` + DLQ | `oficina-fase4-db-orcamento-pagamento-<env>` | `orcamento-pagamento.yml` |
+| `diagnostico-reparo/` | DynamoDB `oficina-<env>-execucoes` (índice `etapa-entradaFilaEm-index`) + fila `oficina-<env>-diagnostico-reparo-comandos` + DLQ | `oficina-fase4-db-diagnostico-reparo-<env>` | `diagnostico-reparo.yml` |
+
+`modules/sqs-com-dlq/` é o único código compartilhado (fila + DLQ após 5 tentativas). Após cada apply, rode `configure-environment.ps1` (OS Service) para levar URLs das filas, JDBC e tabela aos serviços. Para confirmar que os pods acessam SQS e DynamoDB pela LabRole: `.\scripts\test-labrole-access.ps1 -Environment homolog`.
+
+O conteúdo abaixo descreve o RDS herdado da Fase 3, hoje em `os/`.
 
 # Oficina Fase 3 — Database
 
@@ -85,24 +95,20 @@ O modelo de dados é relacional e normalizado. O Backend controla transações e
 .
 ├── .github/workflows/
 │   ├── ci.yml                    # validações de Terraform, testes e segurança
-│   ├── terraform-plan.yml        # plan de homologação e produção
-│   └── terraform-apply.yml       # apply por ambiente
+│   ├── terraform-component.yml   # plan (PR) e apply (push) reutilizável
+│   └── os.yml, orcamento-pagamento.yml, diagnostico-reparo.yml
 ├── docs/
 │   ├── modelo-relacional.md
 │   ├── indices-desempenho.md
 │   ├── adr/                      # decisões do modelo de dados
 │   ├── diagrams/                 # fontes editáveis do diagrama ER
 │   └── assets/                   # diagramas renderizados
-├── environments/                 # exemplos de variáveis por ambiente
-├── lambda/                       # coletor sanitizado de telemetria do RDS
-├── scripts/                      # validação documental e sincronização
-├── tests/                        # testes Terraform e Python
-├── main.tf                       # RDS, rede de acesso, parâmetros e logs
-├── telemetry.tf                  # Lambda, EventBridge e New Relic
-├── providers.tf
-├── variables.tf
-├── outputs.tf
-└── versions.tf
+├── os/                           # RDS + fila de eventos + telemetria (lambda/)
+├── orcamento-pagamento/          # RDS + fila de comandos
+├── diagnostico-reparo/           # DynamoDB + fila de comandos
+├── modules/sqs-com-dlq/          # fila SQS + DLQ
+├── scripts/                      # validação, sincronização e teste da LabRole
+└── tests/                        # testes Python
 ```
 
 ## Pré-requisitos
@@ -118,9 +124,11 @@ O modelo de dados é relacional e normalizado. O Backend controla transações e
 
 ```bash
 terraform fmt -check -recursive
-terraform init -backend=false -input=false -lockfile=readonly
-terraform validate
-tflint --recursive
+for d in os orcamento-pagamento diagnostico-reparo; do
+  terraform -chdir=$d init -backend=false -input=false -lockfile=readonly
+  terraform -chdir=$d validate && terraform -chdir=$d test
+done
+tflint --recursive --config "$PWD/.tflint.hcl"
 python3 scripts/validate_docs.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
@@ -128,8 +136,8 @@ Os comandos locais validam a configuração e não criam recursos na AWS.
 
 ## Configuração por ambiente
 
-- [Homologação](environments/homolog.tfvars.example)
-- [Produção](environments/production.tfvars.example)
+- [Homologação](os/environments/homolog.tfvars.example)
+- [Produção](os/environments/production.tfvars.example)
 
 Principais grupos de variáveis:
 
