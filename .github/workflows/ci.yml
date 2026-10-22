@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, homolog]
+  push:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-validation:
+    name: Repository validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate GitHub Actions workflows
+        run: |
+          curl --retry 3 --retry-all-errors -fsSL \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            -o /tmp/actionlint.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint
+
+      - name: Validate documentation and ER diagram
+        run: python3 scripts/validate_docs.py
+
+  terraform-validation:
+    name: Terraform validation
+    needs: repository-validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init without remote backend
+        run: terraform init -backend=false -input=false -lockfile=readonly
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Validate example variable names
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          variables = set(
+              re.findall(
+                  r'^variable\s+"([a-zA-Z0-9_]+)"',
+                  Path('variables.tf').read_text(encoding='utf-8'),
+                  re.MULTILINE,
+              )
+          )
+
+          for path in Path('environments').glob('*.tfvars.example'):
+              assigned = set(
+                  re.findall(
+                      r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=',
+                      path.read_text(encoding='utf-8'),
+                      re.MULTILINE,
+                  )
+              )
+              unknown = sorted(assigned - variables)
+              if unknown:
+                  raise SystemExit(f'{path}: undeclared variables: {unknown}')
+          PY
+
+      - name: Ensure no IAM resource is declared
+        run: |
+          if grep -rnE '^resource\s+"aws_iam_' --include='*.tf' .; then
+            echo "::error::Este repositório não pode criar recursos IAM no AWS Academy."
+            exit 1
+          fi
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint --recursive
+
+  telemetry-validation:
+    name: Database integration tests
+    needs: terraform-validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test RDS telemetry collector
+        run: python3 -m unittest tests/test_rds_newrelic_telemetry.py
+
+      - name: Test database output synchronization
+        run: python3 -m unittest tests/test_sync_database_outputs.py
+
+  security-validation:
+    name: Security validation
+    needs: telemetry-validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Checkov
+        run: |
+          pip install --quiet checkov==3.3.9
+          # Verificações ignoradas de propósito, documentadas em docs/validation.md:
+          # CKV_AWS_158 log group com KMS, CKV_AWS_338 retenção de 1 ano,
+          # CKV_AWS_293 deletion protection, CKV_AWS_157 Multi-AZ,
+          # CKV_AWS_353 Performance Insights, CKV_AWS_161 autenticação IAM,
+          # CKV_AWS_118 Enhanced Monitoring.
+          checkov -d . --compact --quiet --framework terraform \
+            --skip-check CKV_AWS_158,CKV_AWS_338,CKV_AWS_293,CKV_AWS_157,CKV_AWS_353,CKV_AWS_161,CKV_AWS_118
+
+      - name: Trivy infrastructure scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+
+      - name: Detect committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
