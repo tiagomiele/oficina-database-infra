@@ -131,7 +131,7 @@ class HcpClient:
 class GitHubClient:
     def __init__(self, token: str) -> None:
         if not token.strip():
-            raise SyncError("GITHUB_SYNC_TOKEN não configurado.")
+            raise SyncError("Secret REPO_SYNC_TOKEN não configurado.")
         self._token = token
 
     def _request(

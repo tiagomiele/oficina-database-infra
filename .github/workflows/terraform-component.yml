@@ -88,7 +88,7 @@ jobs:
       - name: Validate deployment configuration
         env:
           TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
-          GITHUB_SYNC_TOKEN: ${{ secrets.GITHUB_SYNC_TOKEN }}
+          GITHUB_SYNC_TOKEN: ${{ secrets.REPO_SYNC_TOKEN }}
           SYNC_APP_CLIENT_ID: ${{ vars.SYNC_APP_CLIENT_ID }}
           SYNC_APP_PRIVATE_KEY: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
           SYNC_OS_OUTPUTS: ${{ inputs.sync_os_outputs }}
@@ -103,7 +103,7 @@ jobs:
             if [ -z "${!name:-}" ]; then missing+=("$name"); fi
           done
           if [ "$SYNC_OS_OUTPUTS" = "true" ] && [ -z "$GITHUB_SYNC_TOKEN" ] && { [ -z "$SYNC_APP_CLIENT_ID" ] || [ -z "$SYNC_APP_PRIVATE_KEY" ]; }; then
-            missing+=("GITHUB_SYNC_TOKEN ou SYNC_APP_CLIENT_ID+SYNC_APP_PRIVATE_KEY")
+            missing+=("REPO_SYNC_TOKEN ou SYNC_APP_CLIENT_ID+SYNC_APP_PRIVATE_KEY")
           fi
           if [ "${#missing[@]}" -gt 0 ]; then
             printf '::error::Configuração de deploy incompleta: %s\n' "${missing[*]}"
@@ -174,7 +174,7 @@ jobs:
         if: inputs.sync_os_outputs
         env:
           TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
-          GITHUB_SYNC_TOKEN: ${{ steps.sync-app-token.outputs.token || secrets.GITHUB_SYNC_TOKEN }}
+          GITHUB_SYNC_TOKEN: ${{ steps.sync-app-token.outputs.token || secrets.REPO_SYNC_TOKEN }}
         run: |
           set -euo pipefail
           terraform output -json > "$RUNNER_TEMP/database-outputs.json"
