@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Confirma, de dentro de um pod no EKS, que a LabRole dos nós acessa as filas SQS
     e a tabela DynamoDB da Fase 4. Não altera a infraestrutura: só envia, lê e apaga
@@ -53,19 +53,37 @@ $checks += "NAME='DynamoDB get $table'; check aws dynamodb get-item --table-name
 $checks += "NAME='DynamoDB query índice $table'; check aws dynamodb query --table-name $table --index-name etapa-entradaFilaEm-index --key-condition-expression 'etapa = :e' --expression-attribute-values '{`":e`":{`"S`":`"NA_FILA_DIAGNOSTICO`"}}'"
 $checks += "NAME='DynamoDB delete $table'; check aws dynamodb delete-item --table-name $table --key '$key'"
 $checks += 'exit $fail'
-$script = $checks -join "`n"
+# Script em base64 numa variável de ambiente: o Windows PowerShell 5.1 corrompe aspas internas ao passar
+# argumentos para programas nativos, e o sh recebia um script quebrado.
+$encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($checks -join "`n")))
 
 $podName = "labrole-check-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
 Write-Host "Executando o pod $podName no namespace $Namespace..."
-& kubectl run $podName --namespace $Namespace --image $Image --restart=Never --rm -i --quiet `
-    --env "AWS_REGION=$AwsRegion" --env "AWS_DEFAULT_REGION=$AwsRegion" `
-    --command -- sh -c $script
-$exitCode = $LASTEXITCODE
+& kubectl run $podName --namespace $Namespace --image $Image --restart=Never `
+    --env "AWS_REGION=$AwsRegion" --env "AWS_DEFAULT_REGION=$AwsRegion" --env "CHECK_SCRIPT=$encodedScript" `
+    --command -- sh -c 'echo $CHECK_SCRIPT | base64 -d > /tmp/check.sh && sh /tmp/check.sh' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Não foi possível criar o pod $podName."
+}
 
-if ($exitCode -eq 0) {
+# Espera o pod terminar e só então lê o log (com --rm -i o pod podia acabar antes do attach e a saída se perdia).
+$phase = ''
+$deadline = (Get-Date).AddMinutes(3)
+while ($phase -notin @('Succeeded', 'Failed') -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 3
+    $phase = [string](& kubectl get pod $podName --namespace $Namespace -o 'jsonpath={.status.phase}' 2>$null)
+}
+& kubectl logs $podName --namespace $Namespace
+& kubectl delete pod $podName --namespace $Namespace --wait=false | Out-Null
+
+if ($phase -eq 'Succeeded') {
     Write-Host 'LabRole validada: o pod acessa as 3 filas SQS e a tabela DynamoDB.'
 }
+elseif ($phase -eq 'Failed') {
+    Write-Warning 'Algum acesso falhou (linhas FALHA acima). Se TODOS falharam, verifique o hop limit do IMDS dos nós (precisa ser 2).'
+    exit 1
+}
 else {
-    Write-Warning 'Algum acesso falhou. Se TODOS falharam, verifique o hop limit do IMDS dos nós (precisa ser 2) ou acione o plano B combinado.'
-    exit $exitCode
+    Write-Warning "O pod não terminou em 3 minutos (fase: '$phase'). Veja: kubectl describe pod $podName -n $Namespace"
+    exit 1
 }
