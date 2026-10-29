@@ -1,0 +1,30 @@
+name: Database Orçamento e Pagamento (RDS + SQS)
+
+on:
+  pull_request:
+    branches: [main, homolog]
+    paths:
+      - '.github/workflows/orcamento-pagamento.yml'
+      - '.github/workflows/terraform-component.yml'
+      - 'orcamento-pagamento/**'
+      - 'modules/sqs-com-dlq/**'
+  push:
+    branches: [main, homolog]
+    paths:
+      - '.github/workflows/orcamento-pagamento.yml'
+      - '.github/workflows/terraform-component.yml'
+      - 'orcamento-pagamento/**'
+      - 'modules/sqs-com-dlq/**'
+  workflow_dispatch:
+
+concurrency:
+  group: database-orcamento-pagamento-${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  terraform:
+    uses: ./.github/workflows/terraform-component.yml
+    with:
+      component: orcamento-pagamento
+      workspace_key: ORCAMENTO_PAGAMENTO
+    secrets: inherit
