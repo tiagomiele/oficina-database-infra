@@ -1,208 +1,279 @@
 > **Tech Challenge Fase 4 — `oficina-database-infra`**
 >
-> Bancos e filas isolados por serviço (RDS, DynamoDB e SQS).
->
-> Base importada da Fase 3. Na Fase 4 o repositório tem **uma pasta por serviço**, cada uma com workspace HCP, state e workflow próprios — aplicar um banco não altera os outros:
+> Bancos de dados e filas da Saga, **um conjunto isolado por serviço**, em Terraform.
 
-| Pasta | Recursos | Workspace HCP | Workflow |
+# Oficina Fase 4 — Database Infra
+
+## 1. Objetivo de negócio
+
+Na Fase 4 a oficina foi dividida em três serviços. Cada um é dono dos seus dados e só conversa com os outros por mensagens. Este repositório cria esses bancos e essas filas:
+
+- o **OS Service** guarda clientes, veículos, catálogo, estoque, Ordens de Serviço e o histórico de status;
+- o **Orçamento e Pagamento** guarda orçamentos, itens e pagamentos (fake ou Mercado Pago);
+- o **Diagnóstico e Reparo** guarda a fila do técnico e o andamento de cada execução;
+- as **filas SQS** levam os comandos e eventos da Saga, e as **DLQs** guardam o que falhou 5 vezes para análise.
+
+Nenhum serviço lê o banco de outro. A única exceção é a Lambda de login do [Auth Serverless](https://github.com/tiagomiele/oficina-auth-serverless), que **só lê** a tabela `clientes` do RDS do OS para autenticar clientes ativos.
+
+## 2. Arquitetura
+
+![Bancos e filas por serviço: SQS com DLQ, RDS PostgreSQL, DynamoDB, HCP Terraform e telemetria New Relic](docs/assets/arquitetura-database.png)
+
+Cada pasta tem **workspace HCP, state e workflow próprios**: aplicar um banco não altera os outros.
+
+| Pasta | Banco | Fila principal → DLQ | Workspace HCP | Workflow |
+|---|---|---|---|---|
+| `os/` | RDS PostgreSQL 16 (`oficina`) | `oficina-<env>-os-eventos` → `…-dlq` | `oficina-fase4-db-os-<env>` | `os.yml` |
+| `orcamento-pagamento/` | RDS PostgreSQL 16 próprio (`oficina`) | `oficina-<env>-orcamento-pagamento-comandos` → `…-dlq` | `oficina-fase4-db-orcamento-pagamento-<env>` | `orcamento-pagamento.yml` |
+| `diagnostico-reparo/` | DynamoDB `oficina-<env>-execucoes` | `oficina-<env>-diagnostico-reparo-comandos` → `…-dlq` | `oficina-fase4-db-diagnostico-reparo-<env>` | `diagnostico-reparo.yml` |
+
+`modules/sqs-com-dlq/` é o único código compartilhado. `<env>` é `homolog` ou `production`.
+
+**Quem publica e quem consome:**
+
+| Fila | Publica | Consome |
+|---|---|---|
+| `os-eventos` | Orçamento e Pagamento, Diagnóstico e Reparo | OS Service (orquestrador da Saga) |
+| `orcamento-pagamento-comandos` | OS Service | Orçamento e Pagamento |
+| `diagnostico-reparo-comandos` | OS Service | Diagnóstico e Reparo |
+
+Cada mensagem traz `messageId` e `correlationId`; o destinatário grava o `messageId` em `mensagens_processadas` (ou equivalente) para não aplicar a mesma mensagem duas vezes. O detalhe de cada comando e evento está na documentação da Saga no [OS Service](https://github.com/tiagomiele/oficina-os-service).
+
+## 3. Requisitos funcionais
+
+| Requisito | Onde está |
+|---|---|
+| Banco relacional do OS (clientes, OS, estoque, histórico, controle da Saga) | `os/main.tf` |
+| Banco relacional próprio do Orçamento e Pagamento | `orcamento-pagamento/main.tf` |
+| Tabela NoSQL da fila do técnico, com consulta por etapa em ordem de chegada | `diagnostico-reparo/main.tf` (índice `etapa-entradaFilaEm-index`) |
+| Fila de eventos e duas filas de comandos da Saga | `*/messaging.tf` |
+| Mensagem que falha 5 vezes vai para a DLQ e fica 14 dias | `modules/sqs-com-dlq/main.tf` |
+| Endereços do banco e das filas entregues aos serviços sem credenciais no Git | `outputs.tf` + `scripts/sync-database-outputs.py` |
+| Métricas do RDS e das filas no New Relic (opcional) | `os/telemetry.tf` + `os/lambda/rds_newrelic_telemetry.py` |
+
+## 4. Requisitos técnicos
+
+| Item | RDS (`os/` e `orcamento-pagamento/`) | DynamoDB (`diagnostico-reparo/`) | SQS (módulo) |
 |---|---|---|---|
-| `os/` | RDS PostgreSQL do OS Service + fila `oficina-<env>-os-eventos` + DLQ + telemetria New Relic | `oficina-fase4-db-os-<env>` | `os.yml` |
-| `orcamento-pagamento/` | RDS PostgreSQL próprio + fila `oficina-<env>-orcamento-pagamento-comandos` + DLQ | `oficina-fase4-db-orcamento-pagamento-<env>` | `orcamento-pagamento.yml` |
-| `diagnostico-reparo/` | DynamoDB `oficina-<env>-execucoes` (índice `etapa-entradaFilaEm-index`) + fila `oficina-<env>-diagnostico-reparo-comandos` + DLQ | `oficina-fase4-db-diagnostico-reparo-<env>` | `diagnostico-reparo.yml` |
+| Rede | sub-redes privadas, `publicly_accessible = false`, porta 5432 liberada só para o Security Group do EKS | endpoint AWS, acesso pela LabRole | endpoint AWS, acesso pela LabRole |
+| Criptografia | `storage_encrypted = true` e `rds.force_ssl = 1` | SSE ativado | `sqs_managed_sse_enabled` |
+| Capacidade | `db.t3.micro`, 20 GB, crescendo até 40 GB | `PAY_PER_REQUEST` | — |
+| Mensageria | — | — | visibilidade 60 s, retenção 4 dias, long polling 20 s, `maxReceiveCount = 5`, DLQ 14 dias |
+| Logs | `postgresql` no CloudWatch (7 ou 14 dias), consultas acima de 1 s e DDL | — | — |
 
-`modules/sqs-com-dlq/` é o único código compartilhado (fila + DLQ após 5 tentativas). Após cada apply, rode `configure-environment.ps1` (OS Service) para levar URLs das filas, JDBC e tabela aos serviços. Para confirmar que os pods acessam SQS e DynamoDB pela LabRole: `.\scripts\test-labrole-access.ps1 -Environment homolog`.
+**Homologação × produção** (valores aplicados pelo `configure-environment.ps1`):
 
-O conteúdo abaixo descreve o RDS herdado da Fase 3, hoje em `os/`.
+| Configuração | homolog | production (AWS Academy, descartável) | production endurecida |
+|---|---|---|---|
+| Backup | 7 dias | 14 dias | 14 dias |
+| Multi-AZ | não | não | sim |
+| Proteção contra exclusão | não | não | sim |
+| Snapshot final no destroy | não | não | sim |
 
-# Oficina Fase 3 — Database
+O perfil descartável (`-UseAwsAcademyDisposableProductionProfile`) é o usado no AWS Academy, para o destroy liberar os créditos sem bloqueio.
 
-Infraestrutura como código responsável pelo PostgreSQL privado da Oficina no Amazon RDS, incluindo rede, segurança, disponibilidade, backup, logs e telemetria.
-
-## Visão de negócio
-
-O Database preserva a memória operacional da oficina. Nele ficam clientes e sua situação cadastral, veículos, catálogos, estoque, fornecedores, Ordens de Serviço, históricos de status e lançamentos financeiros.
-
-Essa base permite autenticar somente clientes ativos, manter a rastreabilidade do atendimento, impedir inconsistências de estoque e produzir relatórios e indicadores. Por isso, privacidade, integridade, recuperação e desempenho são requisitos de negócio, não apenas decisões técnicas.
-
-## Responsabilidades
-
-- provisionar Amazon RDS PostgreSQL privado e criptografado;
-- restringir conectividade aos componentes autorizados;
-- configurar armazenamento, backup, manutenção e proteção por ambiente;
-- exportar logs e telemetria agregada sem expor dados pessoais;
-- fornecer outputs de conexão sem usuário ou senha;
-- manter states HCP independentes para homologação e produção;
-- documentar o modelo relacional, relacionamentos, constraints e índices.
-
-As migrations Flyway V1–V4 permanecem no Backend como fonte executável do schema. Este projeto entrega o serviço gerenciado e não duplica a definição funcional das tabelas.
-
-## Arquitetura do componente
-
-![Arquitetura do Database com RDS PostgreSQL privado, Terraform e observabilidade](docs/assets/arquitetura-database.png)
-
-```text
-Backend no EKS ─────────────┐
-                            ├─ Security Group autorizado
-Auth Lambda na VPC ─────────┘
-                                      ↓
-                         RDS PostgreSQL privado
-                         ├─ SSL e criptografia
-                         ├─ backup e snapshots
-                         └─ logs PostgreSQL
-                                      ↓
-                         CloudWatch / telemetria
-                                      ↓
-                                New Relic
-```
-O RDS não possui endpoint público. A conectividade é permitida somente aos componentes autorizados dentro da VPC.
-
-## Modelo arquitetural e práticas
-
-O projeto utiliza **Infrastructure as Code declarativa**. Terraform descreve RDS, subnet group, security group, parâmetros, backup, logs, telemetria e outputs. O plan permite revisar impactos antes do apply, e o state remoto separa homologação de produção.
-
-O modelo de dados é relacional e normalizado. O Backend controla transações e migrations; o PostgreSQL reforça integridade com:
-- chaves primárias e estrangeiras;
-- chaves compostas;
-- constraints de domínio;
-- índices alinhados às consultas;
-- histórico de status da Ordem de Serviço;
-- controle de consistência de estoque e lançamentos.
-
-
-- [Modelo relacional](docs/modelo-relacional.md)
-- [Diagrama visual](docs/assets/modelo-relacional-database.png)
-- [ADR de consistência](docs/adr/0001-consistencia-modelo.md)
-- [Índices e desempenho](docs/indices-desempenho.md)
-
-## Stack e ferramentas
+## 5. Stack técnica
 
 | Área | Tecnologias |
 |---|---|
-| Banco | Amazon RDS PostgreSQL 16 |
-| Infraestrutura | Terraform, HCP Terraform, VPC, sub-redes privadas e Security Groups |
-| Segurança | SSL obrigatório, criptografia, banco privado e Secrets externos |
-| Disponibilidade | Multi-AZ por ambiente, backups e snapshot final configurável |
-| Logs | PostgreSQL logs e Amazon CloudWatch Logs |
-| Telemetria | AWS Lambda Python, EventBridge e New Relic Event API |
-| Modelo funcional | SQL, Flyway, constraints e índices |
-| Qualidade | Terraform Validate, TFLint, testes Terraform e testes Python |
-| Segurança de código | Checkov, Trivy e Gitleaks |
-| Automação | GitHub Actions, GitHub Environments e sincronização de outputs |
+| Bancos | Amazon RDS PostgreSQL 16 (2 instâncias) e Amazon DynamoDB |
+| Mensageria | Amazon SQS com DLQ e redrive |
+| Infraestrutura | Terraform ≥ 1.6, provider AWS, HCP Terraform (1 workspace por pasta e ambiente) |
+| Credenciais AWS | `LabRole` do AWS Academy; o repositório não declara IAM |
+| Telemetria | AWS Lambda Python, EventBridge (`rate(5 minutes)`), CloudWatch e New Relic Event API |
+| Schema SQL | Flyway nos próprios serviços (OS V1–V5, Orçamento e Pagamento V1) |
+| Qualidade | `terraform fmt/validate/test`, TFLint, testes Python (`unittest`) e `validate_docs.py` |
+| Segurança | Checkov, Trivy, Gitleaks e actionlint |
+| Automação | GitHub Actions, GitHub Environments e GitHub App para sincronizar outputs |
 
-## Estrutura de pastas
+As tabelas SQL não são criadas aqui: cada serviço aplica as próprias migrations Flyway ao subir.
 
-```text
-.
-├── .github/workflows/
-│   ├── ci.yml                    # validações de Terraform, testes e segurança
-│   ├── terraform-component.yml   # plan (PR) e apply (push) reutilizável
-│   └── os.yml, orcamento-pagamento.yml, diagnostico-reparo.yml
-├── docs/
-│   ├── modelo-relacional.md
-│   ├── indices-desempenho.md
-│   ├── adr/                      # decisões do modelo de dados
-│   ├── diagrams/                 # fontes editáveis do diagrama ER
-│   └── assets/                   # diagramas renderizados
-├── os/                           # RDS + fila de eventos + telemetria (lambda/)
-├── orcamento-pagamento/          # RDS + fila de comandos
-├── diagnostico-reparo/           # DynamoDB + fila de comandos
-├── modules/sqs-com-dlq/          # fila SQS + DLQ
-├── scripts/                      # validação, sincronização e teste da LabRole
-└── tests/                        # testes Python
+## 6. Bancos de dados e como ver os dados
+
+### 6.1 RDS do OS Service
+
+| Tabela | Conteúdo |
+|---|---|
+| `clientes`, `veiculos` | cadastro (CPF/CNPJ normalizado, `ativo`) |
+| `users` | usuários administrativos |
+| `servicos`, `pecas`, `estoque_pecas`, `movimentacao_estoque_pecas` | catálogo e estoque |
+| `notas_fiscais_fornecedor`, `itens_nota_fiscal_fornecedor` | entrada de peças |
+| `ordens_servico`, `numero_os_sequencia`, `historico_status_ordem_servico` | OS, numeração e histórico de status |
+| `orcamentos`, `itens_orcamento`, `orcamentos_itens_ordem_servico`, `conta_corrente_oficina` | tabelas herdadas da Fase 3 |
+| `mensagens_processadas` | IDs das mensagens da Saga já aplicadas (idempotência) |
+
+O modelo completo está em [modelo relacional](docs/modelo-relacional.md), [diagrama](docs/assets/modelo-relacional-database.png), [índices](docs/indices-desempenho.md) e [ADR](docs/adr/0001-consistencia-modelo.md).
+
+### 6.2 RDS do Orçamento e Pagamento
+
+`orcamentos`, `itens_orcamento`, `pagamentos` e `mensagens_processadas`. O detalhe e as consultas prontas estão no [README do serviço](https://github.com/tiagomiele/oficina-orcamento-pagamento-service#readme).
+
+### 6.3 Ver os dados do RDS (DBeaver ou `psql`)
+
+O RDS é privado, então o acesso é por um **túnel temporário** dentro do cluster. Abra uma janela PowerShell, rode o bloco e deixe a janela aberta:
+
+```powershell
+# OS Service. Para o Orçamento e Pagamento troque as 3 primeiras linhas por:
+#   $ns='oficina-orcamento-pagamento-production'; $cm='orcamento-pagamento-config'; $sec='orcamento-pagamento-secrets'
+$ns  = 'oficina-production'          # homologação: oficina-homolog
+$cm  = 'oficina-config'
+$sec = 'oficina-secrets'
+$url = kubectl get configmap $cm -n $ns -o jsonpath='{.data.DB_URL}'
+$dbHost = $url -replace '^jdbc:postgresql://([^:/]+).*$', '$1'
+"Usuario: " + (kubectl get configmap $cm -n $ns -o jsonpath='{.data.DB_USER}')
+"Database: " + ($url -replace '^.*/', '' -replace '\?.*$', '')
+$b64 = kubectl get secret $sec -n $ns -o jsonpath='{.data.DB_PASSWORD}'
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | Set-Clipboard   # senha na área de transferência
+kubectl run pg-tunnel -n $ns --image=alpine/socat --restart=Never -- "tcp-listen:5432,fork,reuseaddr" "tcp-connect:${dbHost}:5432"
+kubectl wait pod/pg-tunnel -n $ns --for=condition=Ready --timeout=120s
+kubectl port-forward -n $ns pod/pg-tunnel 15432:5432
 ```
 
-## Pré-requisitos
+Confira o namespace com `kubectl get ns`. No DBeaver: **PostgreSQL**, host `localhost`, porta `15432`, database e usuário mostrados acima, senha colada e SSL `require`. Com `psql`: `psql "host=localhost port=15432 dbname=oficina user=oficina_admin sslmode=require"`.
 
-- Git;
-- Terraform compatível com `versions.tf`;
-- Python 3 para testes e scripts;
-- TFLint para validação estática;
-- credenciais AWS somente para plans e deploys remotos;
-- organização e workspaces HCP Terraform configurados.
+Ao terminar: `Ctrl+C`, `Set-Clipboard -Value ' '` e `kubectl delete pod pg-tunnel -n $ns`.
 
-## Validar localmente
+Consultas úteis no banco do OS:
+
+```sql
+SELECT id_ordem_servico, status, valor_total_conserto, atualizado_em FROM ordens_servico ORDER BY atualizado_em DESC LIMIT 10;
+SELECT id_ordem_servico, status, entrada_em, saida_em FROM historico_status_ordem_servico WHERE id_ordem_servico = 'OS-102026-000003' ORDER BY entrada_em;
+SELECT tipo, numero_os, correlation_id, processada_em FROM mensagens_processadas ORDER BY processada_em DESC LIMIT 20;
+```
+
+Não consulte nem exporte CPF, e-mail ou telefone para fora da sessão.
+
+### 6.4 DynamoDB do Diagnóstico e Reparo
+
+Tabela `oficina-<env>-execucoes`: chave `numeroOs`; índice `etapa-entradaFilaEm-index` (`etapa` + `entradaFilaEm`) para listar a fila do técnico em ordem de chegada. Não precisa de túnel:
+
+```powershell
+$t = 'oficina-production-execucoes'
+aws dynamodb scan --table-name $t --region us-west-2 --query 'Items[].{os:numeroOs.S,etapa:etapa.S}' --output table
+aws dynamodb query --table-name $t --region us-west-2 --index-name etapa-entradaFilaEm-index --key-condition-expression 'etapa = :e' --expression-attribute-values '{\":e\":{\"S\":\"NA_FILA_DIAGNOSTICO\"}}' --query 'Items[].numeroOs.S'
+```
+
+No console: **DynamoDB → Tables → `oficina-<env>-execucoes` → Explore table items**. Mais exemplos no [README do serviço](https://github.com/tiagomiele/oficina-diagnostico-reparo-service#readme).
+
+### 6.5 Filas SQS e DLQs
+
+```powershell
+$env:AWS_REGION = 'us-west-2'
+# quantidade de mensagens em cada fila e DLQ do ambiente
+aws sqs list-queues --queue-name-prefix oficina-production --query 'QueueUrls' --output text |
+  ForEach-Object { $_ -split '\s+' } | ForEach-Object {
+    $a = aws sqs get-queue-attributes --queue-url $_ --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible | ConvertFrom-Json
+    '{0,-70} visiveis={1} em_processamento={2}' -f ($_ -replace '^.*/', ''), $a.Attributes.ApproximateNumberOfMessages, $a.Attributes.ApproximateNumberOfMessagesNotVisible
+  }
+```
+
+Com a Saga saudável, as filas principais ficam perto de 0 e as DLQs em 0.
+
+**Ler uma mensagem da DLQ** sem apagar (ela volta a ficar visível em 30 s):
+
+```powershell
+$dlq = aws sqs get-queue-url --queue-name oficina-production-os-eventos-dlq --query QueueUrl --output text
+aws sqs receive-message --queue-url $dlq --max-number-of-messages 1 --visibility-timeout 30 --attribute-names All --message-attribute-names All
+```
+
+**Reprocessar a DLQ** depois de corrigir a causa (devolve as mensagens à fila de origem):
+
+```powershell
+$arn = aws sqs get-queue-attributes --queue-url $dlq --attribute-names QueueArn --query Attributes.QueueArn --output text
+aws sqs start-message-move-task --source-arn $arn
+```
+
+No console: **SQS → fila → Send and receive messages → Poll for messages**, e na DLQ, **Start DLQ redrive**.
+
+## 7. Como executar
+
+### 7.1 Validar localmente (sem AWS)
 
 ```bash
 terraform fmt -check -recursive
-for d in os orcamento-pagamento diagnostico-reparo; do
-  terraform -chdir=$d init -backend=false -input=false -lockfile=readonly
+for d in os orcamento-pagamento diagnostico-reparo modules/sqs-com-dlq; do
+  terraform -chdir=$d init -backend=false -input=false
   terraform -chdir=$d validate && terraform -chdir=$d test
 done
 tflint --recursive --config "$PWD/.tflint.hcl"
 python3 scripts/validate_docs.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
-Os comandos locais validam a configuração e não criam recursos na AWS.
 
-## Configuração por ambiente
+Os testes Terraform usam provider simulado e não criam recursos.
 
-- [Homologação](os/environments/homolog.tfvars.example)
-- [Produção](os/environments/production.tfvars.example)
+### 7.2 Aplicar na AWS
 
-Principais grupos de variáveis:
+O caminho completo, com a ordem dos 6 repositórios, está no Bootstrap da Fase 4 do [OS Service](https://github.com/tiagomiele/oficina-os-service). Resumo:
 
-| Grupo | Exemplos de finalidade |
+1. O [Kubernetes Infra](https://github.com/tiagomiele/oficina-kubernetes-infra) precisa estar aplicado antes, porque gera VPC, sub-redes e o Security Group do EKS.
+2. `oficina-os-service/scripts/configure-environment.ps1 -Environment homolog` (ou `production`) cria os workspaces HCP e grava as variáveis, inclusive as senhas como sensíveis.
+3. Um push na `homolog` (ou na `main`) que altere uma pasta roda o workflow dela e aplica só aquele componente.
+4. Rode o `configure-environment.ps1` de novo para levar URLs das filas, JDBC e tabela aos serviços.
+
+Para conferir, de dentro de um pod, se a `LabRole` acessa as filas e a tabela: `scripts/test-labrole-access.ps1 -Environment homolog`. O script só envia, lê e apaga uma mensagem e um item de teste.
+
+### 7.3 Destruir
+
+A destruição em ordem, para economizar créditos, é feita pelo `oficina-os-service/scripts/destroy-environment.ps1`, descrito no Bootstrap da Fase 4.
+
+## 8. Variáveis principais
+
+| Variável | Padrão | Finalidade |
+|---|---|---|
+| `aws_region`, `environment`, `project_name` | `us-west-2`, `homolog`, `oficina` | nomes dos recursos |
+| `vpc_id`, `private_subnet_ids`, `allowed_security_group_ids` | — | rede do EKS (vem do Kubernetes Infra) |
+| `db_name`, `db_username`, `db_password` | `oficina`, `oficina_admin`, sensível | banco inicial |
+| `db_instance_class`, `db_allocated_storage`, `db_max_allocated_storage` | `db.t3.micro`, 20, 40 | capacidade |
+| `multi_az`, `backup_retention_days`, `deletion_protection`, `skip_final_snapshot` | ver seção 4 | disponibilidade |
+| `rds_newrelic_telemetry_enabled`, `newrelic_account_id`, `newrelic_license_key` | `false`, —, sensível | telemetria (só `os/`) |
+| `deletion_protection`, `point_in_time_recovery` | `false`, `true` | DynamoDB |
+
+Exemplos: [os homolog](os/environments/homolog.tfvars.example), [os production](os/environments/production.tfvars.example), [orçamento production](orcamento-pagamento/environments/production.tfvars.example) e [diagnóstico production](diagnostico-reparo/environments/production.tfvars.example). Não versione `.tfvars` com senhas ou chaves.
+
+## 9. Outputs
+
+| Pasta | Outputs |
 |---|---|
-| Identificação | projeto, ambiente e região AWS |
-| Rede | VPC, sub-redes privadas e Security Groups permitidos |
-| Banco | versão, classe, armazenamento, nome e usuário |
-| Segurança | senha sensível, SSL e acesso privado |
-| Disponibilidade | Multi-AZ, backup, deletion protection e snapshot final |
-| Logs | exports PostgreSQL, retenção e consultas lentas |
-| New Relic | conta, região, ingest key e habilitação da telemetria |
+| `os/` e `orcamento-pagamento/` | `database_endpoint`, `database_port`, `database_name`, `jdbc_url`, `database_security_group_id`, `database_log_groups`, `queue_url`, `queue_arn`, `dlq_url` |
+| `diagnostico-reparo/` | `table_name`, `table_arn`, `fila_index_name`, `queue_url`, `queue_arn`, `dlq_url` |
 
-A senha do banco e a chave New Relic devem ser variáveis sensíveis no HCP Terraform. Não crie arquivos `.tfvars` com credenciais reais no repositório.
+Usuário e senha não são outputs. Depois do apply do `os/`, o workflow sincroniza `db_url` no workspace do Auth e `APP_DB_URL` no GitHub Environment do OS Service (`scripts/sync-database-outputs.py`).
 
-## Outputs principais
+## 10. CI/CD
 
-O projeto publica somente dados necessários à integração, como:
-
-- identificador e endpoint do RDS;
-- porta e nome lógico do banco;
-- Security Group do banco;
-- informações de rede necessárias aos projetos consumidores;
-- estado da telemetria.
-
-Usuário e senha não são publicados como outputs.
-
-## CI/CD e implantação
-
-| Etapa | Comportamento |
+| Evento | O que roda |
 |---|---|
-| Pull Request | executa CI e Terraform Plan, sem criar ou alterar recursos |
-| Merge em `homolog` | aplica a infraestrutura de homologação |
-| Sincronização | envia endpoint e parâmetros não sensíveis para Auth e Backend |
-| Promoção para `main` | aplica produção pelo GitHub Environment protegido |
+| Pull Request | CI (validação do repositório, Terraform, testes Python e segurança) e `terraform plan` só da pasta alterada |
+| Push na `homolog` | `terraform apply` da pasta alterada no ambiente `homolog` |
+| Push na `main` | `terraform apply` da pasta alterada no ambiente `production` (GitHub Environment protegido) |
 
-Fluxo de promoção:
+Promoção: `feature → PR → homolog → PR → main`.
 
-```text
-feature → Pull Request → homolog → Pull Request → main
-```
+## 11. Observabilidade
 
-Na implantação completa da Oficina, o Database deve ser aplicado depois do Kubernetes, pois utiliza VPC, sub-redes e Security Groups produzidos pelo projeto de plataforma.
+- Com `rds_newrelic_telemetry_enabled = true`, a Lambda `os/lambda/rds_newrelic_telemetry.py` roda a cada 5 minutos e envia ao New Relic os eventos `OficinaRdsSample` (CPU, conexões, memória, armazenamento, latência, IOPS, erros do PostgreSQL e consultas lentas) e `OficinaSqsSample` (mensagens em cada fila e DLQ).
+- No New Relic: `SELECT latest(approximateNumberOfMessages) FROM OficinaSqsSample FACET queueName SINCE 30 minutes ago`.
+- Logs do PostgreSQL ficam no CloudWatch em `/aws/rds/instance/<identificador>/postgresql`.
+- Dashboards, alertas e Synthetic estão no [Kubernetes Infra](https://github.com/tiagomiele/oficina-kubernetes-infra).
 
-## Operação e segurança
+## 12. Segurança
 
-- o RDS permanece privado;
-- acessos administrativos devem ocorrer por túnel seguro ou recurso autorizado dentro da VPC;
-- conexões externas diretas não devem ser liberadas para `0.0.0.0/0`;
-- logs devem evitar parâmetros, documentos e dados pessoais;
-- produção deve manter proteção contra exclusão e política de snapshot coerente;
-- alterações devem ser revisadas pelo Terraform Plan antes do apply.
+- RDS sem endpoint público, com SSL obrigatório e porta liberada só para o Security Group do EKS.
+- Senhas geradas pelo `configure-environment.ps1`, guardadas como sensíveis no HCP e em Secrets do GitHub e do Kubernetes.
+- O repositório não cria IAM: tudo usa a `LabRole`, e o CI bloqueia `aws_iam_*`.
+- Checkov, Trivy e Gitleaks rodam em todo PR.
 
-## Documentação e evidências
+## 13. Repositórios relacionados
 
-- [Documentação central da Fase 3](https://github.com/tiagomiele/fiap-tech-challenge-fase3-oficina-backend/tree/feature/validacao-deploy-aplicacao)
-- [Requisitos obrigatórios e evidências](https://github.com/tiagomiele/fiap-tech-challenge-fase3-oficina-backend/blob/feature/validacao-deploy-aplicacao/README-requisitos-obrigatorios-fase-3.md)
-
-## Projetos relacionados
-
-- [Backend](https://github.com/tiagomiele/fiap-tech-challenge-fase3-oficina-backend)
-- [Auth Serverless](https://github.com/tiagomiele/fiap-tech-challenge-fase3-oficina-auth-serverless)
-- [Kubernetes Infra](https://github.com/tiagomiele/fiap-tech-challenge-fase3-oficina-kubernetes-infra)
+| Repositório | Papel |
+|---|---|
+| [oficina-os-service](https://github.com/tiagomiele/oficina-os-service) | Ordem de Serviço, orquestração da Saga, documentação central e Bootstrap |
+| [oficina-orcamento-pagamento-service](https://github.com/tiagomiele/oficina-orcamento-pagamento-service) | orçamento e pagamento (Mercado Pago) |
+| [oficina-diagnostico-reparo-service](https://github.com/tiagomiele/oficina-diagnostico-reparo-service) | diagnóstico e reparo |
+| [oficina-auth-serverless](https://github.com/tiagomiele/oficina-auth-serverless) | login por CPF e API Gateway |
+| [oficina-kubernetes-infra](https://github.com/tiagomiele/oficina-kubernetes-infra) | EKS e New Relic |
 
 ## Licença
 
 Consulte o arquivo [LICENSE](LICENSE).
-
