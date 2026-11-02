@@ -85,7 +85,7 @@ class SyncDatabaseOutputsTest(unittest.TestCase):
             }
         }
 
-    def test_syncs_auth_and_backend(self) -> None:
+    def test_syncs_only_backend(self) -> None:
         hcp_client = RecordingHcpClient()
         github_client = RecordingGitHubClient()
 
@@ -94,23 +94,11 @@ class SyncDatabaseOutputsTest(unittest.TestCase):
             github_client,
             self.outputs,
             "oficina-org",
-            "oficina-auth-homolog",
             "tiagomiele/oficina-os-service",
             "homolog",
         )
 
-        self.assertEqual(
-            hcp_client.calls,
-            [
-                (
-                    "oficina-org",
-                    "oficina-auth-homolog",
-                    "db_url",
-                    "jdbc:postgresql://database.example:5432/oficina?sslmode=require",
-                    True,
-                )
-            ],
-        )
+        self.assertEqual(hcp_client.calls, [])
         self.assertEqual(
             github_client.calls,
             [
@@ -134,13 +122,6 @@ class SyncDatabaseOutputsTest(unittest.TestCase):
             MODULE.required_jdbc_url({})
         with self.assertRaisesRegex(MODULE.SyncError, "jdbc_url"):
             MODULE.required_jdbc_url({"jdbc_url": {"value": "postgres://invalid"}})
-
-    def test_preserves_existing_query_parameters(self) -> None:
-        value = "jdbc:postgresql://database.example/oficina?connectTimeout=10"
-        self.assertEqual(
-            MODULE.auth_jdbc_url(value),
-            f"{value}&sslmode=require",
-        )
 
     def test_hcp_upserts_sensitive_variable_and_removes_duplicates(self) -> None:
         client = RecordingHcpApiClient(
