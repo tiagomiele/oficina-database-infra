@@ -13,7 +13,7 @@ Na Fase 4 a oficina foi dividida em três serviços. Cada um é dono dos seus da
 - o **Diagnóstico e Reparo** guarda a fila do técnico e o andamento de cada execução;
 - as **filas SQS** levam os comandos e eventos da Saga, e as **DLQs** guardam o que falhou 5 vezes para análise.
 
-Nenhum serviço lê o banco de outro. A única exceção é a Lambda de login do [Auth Serverless](https://github.com/tiagomiele/oficina-auth-serverless), que **só lê** a tabela `clientes` do RDS do OS para autenticar clientes ativos.
+Nenhum serviço lê o banco de outro. A Lambda de login do [Auth Serverless](https://github.com/tiagomiele/oficina-auth-serverless) também não acessa o RDS: ela consulta o cliente no OS Service por REST (`POST /interno/clientes/autenticacao`).
 
 ## 2. Arquitetura
 
@@ -238,7 +238,7 @@ Exemplos: [os homolog](os/environments/homolog.tfvars.example), [os production](
 | `os/` e `orcamento-pagamento/` | `database_endpoint`, `database_port`, `database_name`, `jdbc_url`, `database_security_group_id`, `database_log_groups`, `queue_url`, `queue_arn`, `dlq_url` |
 | `diagnostico-reparo/` | `table_name`, `table_arn`, `fila_index_name`, `queue_url`, `queue_arn`, `dlq_url` |
 
-Usuário e senha não são outputs. Depois do apply do `os/`, o workflow sincroniza `db_url` no workspace do Auth e `APP_DB_URL` no GitHub Environment do OS Service (`scripts/sync-database-outputs.py`).
+Usuário e senha não são outputs. Depois do apply do `os/`, o workflow sincroniza `APP_DB_URL` no GitHub Environment do OS Service (`scripts/sync-database-outputs.py`).
 
 ## 10. CI/CD
 

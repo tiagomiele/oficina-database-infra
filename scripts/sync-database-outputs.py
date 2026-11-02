@@ -207,28 +207,16 @@ def required_jdbc_url(outputs: Mapping[str, object]) -> str:
     return value
 
 
-def auth_jdbc_url(jdbc_url: str) -> str:
-    separator = "&" if "?" in jdbc_url else "?"
-    return f"{jdbc_url}{separator}sslmode=require"
-
-
 def sync_outputs(
     hcp_client: HcpClient,
     github_client: GitHubClient,
     outputs: Mapping[str, object],
     organization: str,
-    auth_workspace: str,
     backend_repository: str,
     environment: str,
 ) -> None:
+    # O Auth não recebe mais o JDBC: o login consulta o cliente no OS Service por REST.
     jdbc_url = required_jdbc_url(outputs)
-    hcp_client.set_workspace_variable(
-        organization,
-        auth_workspace,
-        "db_url",
-        auth_jdbc_url(jdbc_url),
-        sensitive=True,
-    )
     github_client.set_environment_variable(
         backend_repository, environment, "APP_DB_URL", jdbc_url
     )
@@ -239,13 +227,12 @@ def sync_outputs(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Sincroniza o JDBC do Database com Auth e Backend."
+        description="Sincroniza o JDBC do Database com o OS Service."
     )
     parser.add_argument("--outputs-file", type=Path, required=True)
     parser.add_argument(
         "--organization", default=os.environ.get("TF_CLOUD_ORGANIZATION")
     )
-    parser.add_argument("--auth-workspace", required=True)
     parser.add_argument(
         "--backend-repository",
         default="tiagomiele/oficina-os-service",
@@ -270,13 +257,12 @@ def main() -> int:
         GitHubClient(github_token),
         outputs,
         args.organization,
-        args.auth_workspace,
         args.backend_repository,
         args.environment,
     )
     print(
         "Output JDBC sincronizado com "
-        f"{args.auth_workspace} e {args.backend_repository} ({args.environment})."
+        f"{args.backend_repository} ({args.environment})."
     )
     return 0
 

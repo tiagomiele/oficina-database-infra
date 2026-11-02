@@ -14,7 +14,7 @@ on:
         required: true
         type: string
       sync_os_outputs:
-        description: Sincroniza JDBC do OS com Auth e OS Service após o apply
+        description: Sincroniza o JDBC do OS com o OS Service após o apply
         required: false
         type: boolean
         default: false
@@ -170,7 +170,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: oficina-os-service
 
-      - name: Sincronizar JDBC com Auth e OS Service
+      - name: Sincronizar JDBC com o OS Service
         if: inputs.sync_os_outputs
         env:
           TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
@@ -181,9 +181,8 @@ jobs:
           python3 ../scripts/sync-database-outputs.py \
             --outputs-file "$RUNNER_TEMP/database-outputs.json" \
             --organization "$TF_CLOUD_ORGANIZATION" \
-            --auth-workspace "oficina-fase4-auth-${TARGET_ENVIRONMENT}" \
             --environment "$TARGET_ENVIRONMENT"
-          echo "- JDBC sincronizado com Auth e OS Service" >> "$GITHUB_STEP_SUMMARY"
+          echo "- JDBC sincronizado com o OS Service" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Terraform outputs
         run: terraform output -no-color
