@@ -113,11 +113,15 @@ O modelo completo está em [modelo relacional](docs/modelo-relacional.md), [diag
 O RDS é privado, então o acesso é por um **túnel temporário** dentro do cluster. Abra uma janela PowerShell, rode o bloco e deixe a janela aberta:
 
 ```powershell
-# OS Service. Para o Orçamento e Pagamento troque as 3 primeiras linhas por:
-#   $ns='oficina-orcamento-pagamento-production'; $cm='orcamento-pagamento-config'; $sec='orcamento-pagamento-secrets'
-$ns  = 'oficina-production'          # homologação: oficina-homolog
+$amb = 'homolog'                     # ou 'production'
+aws eks update-kubeconfig --region us-west-2 --name "oficina-$amb"   # aponta o kubectl para o cluster do ambiente
+# OS Service. Para o Orçamento e Pagamento troque as 3 linhas abaixo por:
+#   $ns="oficina-orcamento-pagamento-$amb"; $cm='orcamento-pagamento-config'; $sec='orcamento-pagamento-secrets'
+$ns  = "oficina-$amb"
 $cm  = 'oficina-config'
 $sec = 'oficina-secrets'
+kubectl get ns $ns 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Namespace $ns não existe no cluster oficina-$amb. Confira se o ambiente está no ar (kubectl get ns)." }
 $url = kubectl get configmap $cm -n $ns -o jsonpath='{.data.DB_URL}'
 $dbHost = $url -replace '^jdbc:postgresql://([^:/]+).*$', '$1'
 "Usuario: " + (kubectl get configmap $cm -n $ns -o jsonpath='{.data.DB_USER}')
@@ -129,7 +133,7 @@ kubectl wait pod/pg-tunnel -n $ns --for=condition=Ready --timeout=120s
 kubectl port-forward -n $ns pod/pg-tunnel 15432:5432
 ```
 
-Confira o namespace com `kubectl get ns`. No DBeaver: **PostgreSQL**, host `localhost`, porta `15432`, database e usuário mostrados acima, senha colada e SSL `require`. Com `psql`: `psql "host=localhost port=15432 dbname=oficina user=oficina_admin sslmode=require"`.
+Se aparecer `namespace ... not found`, o ambiente escolhido em `$amb` não está no ar ou o `kubectl` aponta para outro cluster. No DBeaver: **PostgreSQL**, host `localhost`, porta `15432`, database e usuário mostrados acima, senha colada e SSL `require`. Com `psql`: `psql "host=localhost port=15432 dbname=oficina user=oficina_admin sslmode=require"`.
 
 Ao terminar: `Ctrl+C`, `Set-Clipboard -Value ' '` e `kubectl delete pod pg-tunnel -n $ns`.
 
