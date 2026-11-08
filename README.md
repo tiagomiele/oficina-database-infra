@@ -110,13 +110,16 @@ O modelo completo está em [modelo relacional](docs/modelo-relacional.md), [diag
 
 ### 6.3 Ver os dados do RDS (DBeaver ou `psql`)
 
-O RDS é privado, então o acesso é por um **túnel temporário** dentro do cluster. Abra uma janela PowerShell, rode o bloco e deixe a janela aberta:
+O RDS é privado: não tem endereço público, e o *Query Editor* do console só funciona com Aurora. Por isso o acesso é por um **túnel temporário** dentro do cluster (pod `pg-tunnel`) e um cliente SQL no seu computador (DBeaver, pgAdmin ou `psql`).
+
+Antes: Lab iniciado e o ambiente escolhido no ar. Abra uma janela PowerShell **só para o túnel**, rode o bloco e deixe a janela aberta. Se ela fechar, o túnel cai.
 
 ```powershell
-$amb = 'homolog'                     # ou 'production'
+$amb   = 'homolog'                     # ou 'production'
+$porta = if ($amb -eq 'production') { 25432 } else { 15432 }   # uma porta por ambiente
 aws eks update-kubeconfig --region us-west-2 --name "oficina-$amb"   # aponta o kubectl para o cluster do ambiente
 # OS Service. Para o Orçamento e Pagamento troque as 3 linhas abaixo por:
-#   $ns="oficina-orcamento-pagamento-$amb"; $cm='orcamento-pagamento-config'; $sec='orcamento-pagamento-secrets'
+#   $ns="oficina-orcamento-pagamento-$amb"; $cm='orcamento-pagamento-config'; $sec='orcamento-pagamento-secrets'; $porta += 1
 $ns  = "oficina-$amb"
 $cm  = 'oficina-config'
 $sec = 'oficina-secrets'
@@ -128,14 +131,52 @@ $dbHost = $url -replace '^jdbc:postgresql://([^:/]+).*$', '$1'
 "Database: " + ($url -replace '^.*/', '' -replace '\?.*$', '')
 $b64 = kubectl get secret $sec -n $ns -o jsonpath='{.data.DB_PASSWORD}'
 [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | Set-Clipboard   # senha na área de transferência
+kubectl delete pod pg-tunnel -n $ns --ignore-not-found               # sobra de uma sessão anterior
 kubectl run pg-tunnel -n $ns --image=alpine/socat --restart=Never -- "tcp-listen:5432,fork,reuseaddr" "tcp-connect:${dbHost}:5432"
-kubectl wait pod/pg-tunnel -n $ns --for=condition=Ready --timeout=120s
-kubectl port-forward -n $ns pod/pg-tunnel 15432:5432
+kubectl wait pod/pg-tunnel -n $ns --for=condition=Ready --timeout=180s
+if ($LASTEXITCODE -ne 0) {
+  kubectl describe pod pg-tunnel -n $ns | Select-String -Context 0,8 'Events:'
+  throw 'O pg-tunnel não ficou pronto. Veja os Events acima e a tabela de problemas logo abaixo.'
+}
+"Túnel aberto em localhost:$porta (deixe esta janela aberta)"
+kubectl port-forward -n $ns pod/pg-tunnel "${porta}:5432"
 ```
 
-Se aparecer `namespace ... not found`, o ambiente escolhido em `$amb` não está no ar ou o `kubectl` aponta para outro cluster. No DBeaver: **PostgreSQL**, host `localhost`, porta `15432`, database e usuário mostrados acima, senha colada e SSL `require`. Com `psql`: `psql "host=localhost port=15432 dbname=oficina user=oficina_admin sslmode=require"`.
+Portas: OS `15432` (homologação) e `25432` (produção); Orçamento e Pagamento `15433` e `25433`. Assim os túneis podem ficar abertos ao mesmo tempo, cada um na sua janela.
 
-Ao terminar: `Ctrl+C`, `Set-Clipboard -Value ' '` e `kubectl delete pod pg-tunnel -n $ns`.
+**Conexão no DBeaver** (crie uma conexão por banco e por ambiente, por exemplo `oficina-homologação` e `oficina-produção`):
+
+| Campo | Valor |
+|---|---|
+| Driver | PostgreSQL |
+| Host | `localhost` |
+| Porta | a mostrada em `Túnel aberto em localhost:...` |
+| Database e usuário | os mostrados pelo bloco (`oficina` e `oficina_admin` no OS) |
+| Senha | `Ctrl+V` (o bloco já copiou) e **Salvar senha** marcado |
+| SSL | aba **SSL** → **Usar SSL**, modo `require` |
+
+Ao rodar um script, confira no seletor de conexão da barra de ferramentas (ou no título da aba, `<conexão> Script`) que é a conexão do ambiente cujo túnel está aberto. Para trocar: clique no seletor ou `Ctrl+9`.
+
+Com `psql`: `psql "host=localhost port=15432 dbname=oficina user=oficina_admin sslmode=require"`.
+
+**Senha:** cada banco tem a sua (OS e Orçamento e Pagamento, homologação e produção). Ela fica no Secret do Kubernetes, gravado a partir de `C:\fiap-secrets\oficina-<env>\`. Se o DBeaver recusar a senha salva, copie a atual numa **nova** janela PowerShell, sem fechar o túnel, e cole no campo **Senha**:
+
+```powershell
+$b64 = kubectl get secret oficina-secrets -n oficina-homolog -o jsonpath='{.data.DB_PASSWORD}'   # O&P: orcamento-pagamento-secrets -n oficina-orcamento-pagamento-homolog
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | Set-Clipboard
+```
+
+**Problemas comuns**
+
+| Sintoma | Causa | O que fazer |
+|---|---|---|
+| `namespace ... not found` | o ambiente de `$amb` não está no ar ou o `kubectl` aponta para outro cluster | confira `$amb` e `kubectl get ns` |
+| `timed out waiting for the condition` ou `pod is not running. Current status=Pending` | nodes cheios (`Too many pods`, `Insufficient cpu/memory`) ou download lento da imagem (`Pulling image`, `ErrImagePull`) | leia os *Events* que o bloco mostra; apague pods `Completed`/`Error` que sobraram (`kubectl get pods -A --field-selector=status.phase!=Running`) e rode o bloco de novo; se for a imagem, espere 1–2 min e rode de novo |
+| DBeaver: `password authentication failed for user` | senha antiga salva na conexão | copie a senha atual (acima) |
+| DBeaver: `Connection refused` / `Connection to localhost:<porta> refused` | conexão de outro ambiente selecionada, ou a janela do túnel foi fechada | selecione a conexão do ambiente do túnel; se a janela fechou, rode o bloco de novo |
+| `port-forward`: `address already in use` | outro túnel já usa a porta | feche a outra janela de túnel |
+
+Ao terminar: `Ctrl+C` na janela do túnel, `Set-Clipboard -Value ' '` e `kubectl delete pod pg-tunnel -n $ns`.
 
 Consultas úteis no banco do OS:
 
@@ -143,40 +184,59 @@ Consultas úteis no banco do OS:
 SELECT id_ordem_servico, status, valor_total_conserto, atualizado_em FROM ordens_servico ORDER BY atualizado_em DESC LIMIT 10;
 SELECT id_ordem_servico, status, entrada_em, saida_em FROM historico_status_ordem_servico WHERE id_ordem_servico = 'OS-102026-000003' ORDER BY entrada_em;
 SELECT tipo, numero_os, correlation_id, processada_em FROM mensagens_processadas ORDER BY processada_em DESC LIMIT 20;
+SELECT tipo, correlation_id, processada_em FROM mensagens_processadas WHERE numero_os = 'OS-102026-000003' ORDER BY processada_em;
 ```
+
+Em `mensagens_processadas`, cada linha é uma mensagem da Saga que o serviço já aplicou:
+- `message_id` é único por mensagem e garante a idempotência;
+- `correlation_id` é o mesmo em todas as mensagens da mesma OS. Ele vem do `X-Request-Id` da abertura da OS: `hml-<número>` nos testes manuais do Bootstrap (seções 16.3 e 16.4), `postman-saga-<runId>` no E2E Newman (`runId` = horário do run em milissegundos) e um UUID quando a requisição chega sem o cabeçalho. O prefixo só indica a origem do teste.
 
 Não consulte nem exporte CPF, e-mail ou telefone para fora da sessão.
 
 ### 6.4 DynamoDB do Diagnóstico e Reparo
 
-Tabela `oficina-<env>-execucoes`: chave `numeroOs`; índice `etapa-entradaFilaEm-index` (`etapa` + `entradaFilaEm`) para listar a fila do técnico em ordem de chegada. Não precisa de túnel:
+Tabela `oficina-<env>-execucoes`: chave `numeroOs`; índice `etapa-entradaFilaEm-index` (`etapa` + `entradaFilaEm`) para listar a fila do técnico em ordem de chegada. O atributo `mensagensProcessadas` guarda os últimos 20 `messageId`. Não precisa de túnel:
 
 ```powershell
-$t = 'oficina-production-execucoes'
+$amb = 'homolog'                     # ou 'production'
+$t = "oficina-$amb-execucoes"
 aws dynamodb scan --table-name $t --region us-west-2 --query 'Items[].{os:numeroOs.S,etapa:etapa.S}' --output table
 aws dynamodb query --table-name $t --region us-west-2 --index-name etapa-entradaFilaEm-index --key-condition-expression 'etapa = :e' --expression-attribute-values '{\":e\":{\"S\":\"NA_FILA_DIAGNOSTICO\"}}' --query 'Items[].numeroOs.S'
 ```
 
-No console: **DynamoDB → Tables → `oficina-<env>-execucoes` → Explore table items**. Mais exemplos no [README do serviço](https://github.com/tiagomiele/oficina-diagnostico-reparo-service#readme).
+**No console** (região **Estados Unidos (Oregon) us-west-2**, no canto superior direito; em outra região a tabela não aparece):
+1. **DynamoDB** → menu da esquerda **Explorar itens** → tabela `oficina-<env>-execucoes`.
+2. Para uma OS: **Varrer** → **Filtros** → atributo `numeroOs`, valor = número da OS → **Executar**. Clique no item para ver `etapa`, `diagnostico`, `correlationId` e `mensagensProcessadas`.
+3. Em SQL: menu **Editor PartiQL** → `SELECT numeroOs, etapa, atualizadoEm FROM "oficina-homolog-execucoes"` → **Executar**.
+
+Mais exemplos no [README do serviço](https://github.com/tiagomiele/oficina-diagnostico-reparo-service#readme).
 
 ### 6.5 Filas SQS e DLQs
 
 ```powershell
+$amb = 'homolog'                     # ou 'production'
 $env:AWS_REGION = 'us-west-2'
 # quantidade de mensagens em cada fila e DLQ do ambiente
-aws sqs list-queues --queue-name-prefix oficina-production --query 'QueueUrls' --output text |
+aws sqs list-queues --queue-name-prefix "oficina-$amb-" --query 'QueueUrls' --output text |
   ForEach-Object { $_ -split '\s+' } | ForEach-Object {
     $a = aws sqs get-queue-attributes --queue-url $_ --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible | ConvertFrom-Json
     '{0,-70} visiveis={1} em_processamento={2}' -f ($_ -replace '^.*/', ''), $a.Attributes.ApproximateNumberOfMessages, $a.Attributes.ApproximateNumberOfMessagesNotVisible
   }
 ```
 
-Com a Saga saudável, as filas principais ficam perto de 0 e as DLQs em 0.
+Com a Saga saudável, as filas principais ficam perto de 0 e as DLQs em 0. **Isso é o esperado:** o consumidor apaga a mensagem da fila assim que a processa, e o SQS não guarda histórico. O conteúdo só fica guardado na DLQ (14 dias), quando a mensagem falha 5 vezes. Para ver depois o que passou pela Saga, use `mensagens_processadas` (6.1 e 6.2, pelo túnel da 6.3), o atributo `mensagensProcessadas` do DynamoDB (6.4) ou os logs do New Relic pelo `correlationId`. Para ver uma mensagem parada na fila, siga o cenário da seção 16.6 do [Bootstrap da Fase 4](https://github.com/tiagomiele/oficina-os-service/blob/homolog/docs/bootstrap-aws-do-zero-fase4.md).
 
-**Ler uma mensagem da DLQ** sem apagar (ela volta a ficar visível em 30 s):
+**No console** (região **Estados Unidos (Oregon) us-west-2**):
+1. **Simple Queue Service** → menu da esquerda **Filas** → no campo de busca, `oficina-homolog-` (ou `oficina-production-`). Aparecem 3 filas principais e 3 `-dlq`.
+2. As colunas **Mensagens disponíveis** e **Mensagens em andamento** ficam nessa lista. Ela não se atualiza sozinha: clique em **⟳**. Se a coluna não aparecer, role a tabela para a direita ou ative-a na engrenagem ⚙.
+3. Dentro da fila, a aba **Monitoramento** mostra os gráficos de enviadas/recebidas (atraso de 1 a 5 min; ajuste o período para **1h**).
+4. Para ler o conteúdo de uma **DLQ**: abra a fila → botão **Enviar e receber mensagens** (no topo, ao lado de **Editar | Excluir | Limpar**) → **Sondar mensagens** → clique no ID → aba **Corpo** (`tipo`, `correlationId`, `numeroOs`, `payload`). Na DLQ, **Iniciar redrive da DLQ** devolve as mensagens à fila de origem.
+5. **Não sonde as filas principais** com o serviço no ar: cada leitura conta como tentativa, e na 5ª a mensagem vai para a DLQ.
+
+**Ler uma mensagem da DLQ** pela CLI sem apagar (ela volta a ficar visível em 30 s):
 
 ```powershell
-$dlq = aws sqs get-queue-url --queue-name oficina-production-os-eventos-dlq --query QueueUrl --output text
+$dlq = aws sqs get-queue-url --queue-name "oficina-$amb-os-eventos-dlq" --query QueueUrl --output text
 aws sqs receive-message --queue-url $dlq --max-number-of-messages 1 --visibility-timeout 30 --attribute-names All --message-attribute-names All
 ```
 
@@ -186,8 +246,6 @@ aws sqs receive-message --queue-url $dlq --max-number-of-messages 1 --visibility
 $arn = aws sqs get-queue-attributes --queue-url $dlq --attribute-names QueueArn --query Attributes.QueueArn --output text
 aws sqs start-message-move-task --source-arn $arn
 ```
-
-No console: **SQS → fila → Send and receive messages → Poll for messages**, e na DLQ, **Start DLQ redrive**.
 
 ## 7. Como executar
 
