@@ -112,7 +112,7 @@ O modelo completo está em [modelo relacional](docs/modelo-relacional.md), [diag
 
 O RDS é privado: não tem endereço público, e o *Query Editor* do console só funciona com Aurora. Por isso o acesso é por um **túnel temporário** dentro do cluster (pod `pg-tunnel`) e um cliente SQL no seu computador (DBeaver, pgAdmin ou `psql`).
 
-Antes: Lab iniciado e o ambiente escolhido no ar. Abra uma janela PowerShell **só para o túnel**, rode o bloco e deixe a janela aberta. Se ela fechar, o túnel cai.
+Antes: Lab iniciado e o ambiente escolhido no ar, com nodes no cluster (`kubectl get nodes` mostra 2 `Ready`; sem nodes, o `pg-tunnel` fica `Pending`). Abra uma janela PowerShell **só para o túnel**, rode o bloco e deixe a janela aberta. Se ela fechar, o túnel cai.
 
 ```powershell
 $amb   = 'homolog'                     # ou 'production'
@@ -157,14 +157,17 @@ Portas: OS `15432` (homologação) e `25432` (produção); Orçamento e Pagament
 
 Ao rodar um script, confira no seletor de conexão da barra de ferramentas (ou no título da aba, `<conexão> Script`) que é a conexão do ambiente cujo túnel está aberto. Para trocar: clique no seletor ou `Ctrl+9`.
 
-Com `psql`: `psql "host=localhost port=15432 dbname=oficina user=oficina_admin sslmode=require"`.
+Com `psql`: `psql "host=localhost port=$porta dbname=oficina user=oficina_admin sslmode=require"` (OS: `15432` na homologação, `25432` na produção).
 
 **Senha:** cada banco tem a sua (OS e Orçamento e Pagamento, homologação e produção). Ela fica no Secret do Kubernetes, gravado a partir de `C:\fiap-secrets\oficina-<env>\`. Se o DBeaver recusar a senha salva, copie a atual numa **nova** janela PowerShell, sem fechar o túnel, e cole no campo **Senha**:
 
 ```powershell
-$b64 = kubectl get secret oficina-secrets -n oficina-homolog -o jsonpath='{.data.DB_PASSWORD}'   # O&P: orcamento-pagamento-secrets -n oficina-orcamento-pagamento-homolog
+$amb = 'homolog'                     # ou 'production' (o kubectl precisa apontar para o cluster oficina-$amb)
+$b64 = kubectl get secret oficina-secrets -n "oficina-$amb" -o jsonpath='{.data.DB_PASSWORD}'   # O&P: orcamento-pagamento-secrets -n "oficina-orcamento-pagamento-$amb"
 [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | Set-Clipboard
 ```
+
+A senha da produção é diferente da senha da homologação: na conexão `oficina-produção`, cole a senha copiada com `$amb = 'production'`.
 
 **Problemas comuns**
 
@@ -172,6 +175,7 @@ $b64 = kubectl get secret oficina-secrets -n oficina-homolog -o jsonpath='{.data
 |---|---|---|
 | `namespace ... not found` | o ambiente de `$amb` não está no ar ou o `kubectl` aponta para outro cluster | confira `$amb` e `kubectl get ns` |
 | `timed out waiting for the condition` ou `pod is not running. Current status=Pending` | nodes cheios (`Too many pods`, `Insufficient cpu/memory`) ou download lento da imagem (`Pulling image`, `ErrImagePull`) | leia os *Events* que o bloco mostra; apague pods `Completed`/`Error` que sobraram (`kubectl get pods -A --field-selector=status.phase!=Running`) e rode o bloco de novo; se for a imagem, espere 1–2 min e rode de novo |
+| `Pending` e `kubectl get nodes` → `No resources found` | o cluster ficou sem nodes (o Lab parou as EC2) | siga a seção 21.2 do [Bootstrap da Fase 4](https://github.com/tiagomiele/oficina-os-service/blob/homolog/docs/bootstrap-aws-do-zero-fase4.md) com o `$amb` do ambiente e rode o bloco de novo |
 | DBeaver: `password authentication failed for user` | senha antiga salva na conexão | copie a senha atual (acima) |
 | DBeaver: `Connection refused` / `Connection to localhost:<porta> refused` | conexão de outro ambiente selecionada, ou a janela do túnel foi fechada | selecione a conexão do ambiente do túnel; se a janela fechou, rode o bloco de novo |
 | `port-forward`: `address already in use` | outro túnel já usa a porta | feche a outra janela de túnel |
